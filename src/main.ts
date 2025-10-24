@@ -1,7 +1,8 @@
 import * as core from '@actions/core';
-import * as github from '@actions/github';
 import * as gh from './github.js';
-import type { Commit, PullRequest, Tag } from './github.js';
+import * as git from './git.js';
+import type { PullRequest } from './github.js';
+import type { Commit, Tag, Release } from './git.js';
 import { SemanticVersion } from './semver.js';
 import { getConventionalImpact } from './conventional_commits.js';
 import { Impact, ImpactResult, ParsedCommitInfo } from './types.js';
@@ -74,11 +75,15 @@ export async function getImpactFromGithub(
 }
 
 export async function handle_release_candidates(
-  token: string,
+  token: string | undefined,
   pr: PullRequest,
   impact: Impact,
   last_release_version: SemanticVersion,
 ) {
+  if (token === undefined) {
+    core.info('No GitHub token provided; skipping release-candidate handling.');
+    return undefined;
+  }
   let prerelease = undefined;
   const is_prerelease = pr.labels?.some(
     (label) => label.name.toLowerCase() === 'release-candidate',
@@ -95,10 +100,8 @@ export async function handle_release_candidates(
     // Fetch previous RCs for the bumped base version. We pass the bumped base
     // as the baseline so that RC tags targeting the bumped version are found
     // even if they were created before the latest release.
-    const previous_release_candidates = await getAllRCsSinceLatestRelease(
-      token,
-      bumped_base,
-    );
+    const previous_release_candidates =
+      await getReleaseCandidatesSinceLatestRelease(token, bumped_base);
     // Extract tag names and ask SemanticVersion to compute the next RC index
     const tagNames = previous_release_candidates.map((t: Tag) => t.name);
     const nextRc = SemanticVersion.nextRcIndex(bumped_base, tagNames);
@@ -110,94 +113,47 @@ export async function handle_release_candidates(
 
 /**
  * Return all pull requests labelled as release-candidate that were merged since
- * the latest release. If no token is provided or an error occurs, returns an
- * empty array. This uses the `getLatestRelease` published_at timestamp to
- * filter PRs by their merged_at field.
+ * the latest release. First attempts to get RC tags from local git, then falls back
+ * to GitHub API. If no token is provided or an error occurs, returns an empty array.
  */
-export async function getAllRCsSinceLatestRelease(
+export async function getReleaseCandidatesSinceLatestRelease(
   token: string,
   baseline: SemanticVersion,
 ): Promise<Tag[]> {
   try {
-    const ctx = github.context;
-    const owner = ctx.repo.owner;
-    const repo = ctx.repo.repo;
-    const octokit = github.getOctokit(token);
-    // We'll collect RC-like identifiers from both tags and releases, dedupe by
-    // name and return any that are newer than the baseline. Using both
-    // sources avoids missing previously-created RCs that exist as releases
-    // (which can happen when a previous run created a release but the tag
-    // listing did not reveal it for some reason).
-    const per_page = 100;
-    const results: Tag[] = [];
-    const seen = new Set<string>();
+    // First, try to get RC tags from local git
+    const localResults = await git.getReleaseCandidates(baseline);
 
-    function considerName(name: string | undefined) {
-      if (!name) return;
-      if (seen.has(name)) return;
-      const parsed = SemanticVersion.parse(name);
-      if (!parsed) return;
-      if (!parsed.prerelease) return;
-      if (!parsed.prerelease.toLowerCase().includes('rc')) return;
-      const cmp = SemanticVersion.compare(parsed, baseline);
-
-      if (cmp <= 0) {
-        if (
-          parsed.major === baseline.major &&
-          parsed.minor === baseline.minor &&
-          parsed.patch === baseline.patch
-        ) {
-          // allow RC targeting same base version even if cmp < 0
-        } else {
-          return; // skip older
-        }
-      }
-      seen.add(name);
-      // preserve the original object shape where possible; at minimum include name
-      results.push({ name });
+    if (localResults.length > 0) {
+      // Convert to Tag format for backwards compatibility
+      const localTags: Tag[] = localResults.map((result) => ({
+        name: result.name,
+      }));
+      core.info(`Found ${localTags.length} RC tags from local git`);
+      return localTags;
     }
 
-    // Fetch tag names (paged)
-    let page = 1;
-    while (true) {
-      const res = await octokit.rest.repos.listTags({
-        owner,
-        repo,
-        per_page,
-        page,
-      });
-      if (!res || !Array.isArray(res.data) || res.data.length === 0) break;
-      for (const t of res.data as Tag[]) {
-        considerName(t.name);
-      }
-      if (res.data.length < per_page) break;
-      page += 1;
+    // Fallback to GitHub API if local git doesn't work or no token provided
+    if (!token) {
+      core.debug('No token provided and no local RC tags found');
+      return [];
     }
 
-    // Fetch releases (paged) and consider their tag_name or name
-    page = 1;
-    while (true) {
-      const res = await octokit.rest.repos.listReleases({
-        owner,
-        repo,
-        per_page,
-        page,
-      });
-      if (!res || !Array.isArray(res.data) || res.data.length === 0) break;
-      for (const r of res.data) {
-        // Release may have tag_name or a name; prefer tag_name then name
-        considerName(r.tag_name ?? r.name);
-      }
-      if (res.data.length < per_page) break;
-      page += 1;
-    }
-
-    core.info(
-      `Found ${results.length} release-candidate entry(s) since latest release`,
+    const githubResults = await gh.getReleaseCandidatesSinceLatestRelease(
+      token,
+      baseline,
     );
-    return results;
+
+    // Convert to Tag format for backwards compatibility
+    const githubTags: Tag[] = githubResults.map((result) => ({
+      name: result.name,
+    }));
+    core.info(
+      `Found ${githubTags.length} release-candidate entry(s) from GitHub API since latest release`,
+    );
+    return githubTags;
   } catch (err) {
-    core.debug(`getAllRCsSinceLatestRelease failed: ${String(err)}`);
+    core.debug(`getReleaseCandidatesSinceLatestRelease failed: ${String(err)}`);
     return [];
   }
 }
@@ -249,10 +205,6 @@ export async function run() {
   try {
     const token = process.env.GITHUB_TOKEN || process.env.INPUT_GITHUB_TOKEN;
 
-    if (!token) {
-      core.setFailed('No GITHUB_TOKEN available — cannot fetch releases');
-      return;
-    }
     const release_notes_format_input = core.getInput('release-notes-format', {
       required: false,
       trimWhitespace: true,
@@ -267,10 +219,16 @@ export async function run() {
       core.info(
         `Attempting to load release notes format from: ${release_notes_format_input}`,
       );
-      const formatContent = await gh.getFileContent(
-        token,
-        release_notes_format_input,
-      );
+
+      let formatContent: string | undefined = undefined;
+      if (token) {
+        formatContent = await gh.getFileContent(
+          token,
+          release_notes_format_input,
+        );
+      } else {
+        formatContent = await git.getFileContent(release_notes_format_input);
+      }
       if (formatContent !== undefined) {
         release_notes_format = formatContent;
         core.info(
@@ -283,7 +241,12 @@ export async function run() {
       }
     }
 
-    const release = await gh.getLatestRelease(token);
+    let release: Release | undefined = undefined;
+    if (token) {
+      release = await gh.getLatestRelease(token);
+    } else {
+      release = await git.getLatestRelease();
+    }
 
     let last_release_version: SemanticVersion | undefined;
     if (release != undefined) {
