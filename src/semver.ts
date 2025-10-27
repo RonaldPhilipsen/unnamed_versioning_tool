@@ -1,5 +1,11 @@
 import * as core from '@actions/core';
-import { Impact } from './types.js';
+
+export enum Impact {
+  NOIMPACT, // Don't release a new version, keep current version
+  PATCH, // Increment patch version ( 0.0.X+1 )
+  MINOR, // Increment minor version ( 0.X+1.0 )
+  MAJOR, // Increment major version ( X+1.0.0 )
+}
 
 export class SemanticVersion {
   major: number;
@@ -113,6 +119,46 @@ export class SemanticVersion {
   }
 
   /**
+   * Compare prerelease versions according to semver specification.
+   * Returns 1 if a > b, -1 if a < b, 0 if equal.
+   * Handles cases where one or both prerelease strings may be undefined.
+   */
+  static comparePrerelease(
+    a: string | undefined,
+    b: string | undefined,
+  ): number {
+    if (!a && !b) return 0;
+    if (!a) return 1; // release > prerelease
+    if (!b) return -1; // prerelease < release
+
+    const aParts = a.split('.');
+    const bParts = b.split('.');
+    const maxLen = Math.max(aParts.length, bParts.length);
+
+    for (let i = 0; i < maxLen; i++) {
+      const ap = aParts[i];
+      const bp = bParts[i];
+
+      if (ap === undefined) return -1;
+      if (bp === undefined) return 1;
+
+      const isANumeric = /^[0-9]+$/.test(ap);
+      const isBNumeric = /^[0-9]+$/.test(bp);
+
+      if (isANumeric && isBNumeric) {
+        const diff = Number(ap) - Number(bp);
+        if (diff !== 0) return Math.sign(diff);
+      } else if (isANumeric !== isBNumeric) {
+        return isANumeric ? -1 : 1; // numeric < non-numeric
+      } else {
+        const diff = ap.localeCompare(bp);
+        if (diff !== 0) return Math.sign(diff);
+      }
+    }
+    return 0;
+  }
+
+  /**
    * Compare two SemanticVersion instances.
    * Returns 1 if a > b, -1 if a < b, 0 if equal.
    * This follows semver precedence for major/minor/patch and treats
@@ -120,38 +166,18 @@ export class SemanticVersion {
    * for the same major.minor.patch.
    */
   static compare(a: SemanticVersion, b: SemanticVersion): number {
-    if (a.major !== b.major) return a.major > b.major ? 1 : -1;
-    if (a.minor !== b.minor) return a.minor > b.minor ? 1 : -1;
-    if (a.patch !== b.patch) return a.patch > b.patch ? 1 : -1;
+    // Compare major.minor.patch using simple subtraction with sign normalization
+    const majorDiff = a.major - b.major;
+    if (majorDiff !== 0) return Math.sign(majorDiff);
+
+    const minorDiff = a.minor - b.minor;
+    if (minorDiff !== 0) return Math.sign(minorDiff);
+
+    const patchDiff = a.patch - b.patch;
+    if (patchDiff !== 0) return Math.sign(patchDiff);
 
     // At this point major/minor/patch are equal — consider prerelease
-    if (!a.prerelease && !b.prerelease) return 0;
-    if (!a.prerelease && b.prerelease) return 1; // release > prerelease
-    if (a.prerelease && !b.prerelease) return -1;
-
-    // Both have prerelease strings — compare dot-separated identifiers
-    const aParts = a.prerelease!.split('.');
-    const bParts = b.prerelease!.split('.');
-    const len = Math.max(aParts.length, bParts.length);
-    for (let i = 0; i < len; i++) {
-      const ap = aParts[i];
-      const bp = bParts[i];
-      if (ap === undefined) return -1;
-      if (bp === undefined) return 1;
-      // numeric identifiers have numeric precedence
-      const an = /^[0-9]+$/.test(ap);
-      const bn = /^[0-9]+$/.test(bp);
-      if (an && bn) {
-        const ai = Number(ap);
-        const bi = Number(bp);
-        if (ai !== bi) return ai > bi ? 1 : -1;
-        continue;
-      }
-      if (an && !bn) return -1;
-      if (!an && bn) return 1;
-      if (ap !== bp) return ap > bp ? 1 : -1;
-    }
-    return 0;
+    return this.comparePrerelease(a.prerelease, b.prerelease);
   }
 
   compareTo(other: SemanticVersion): number {

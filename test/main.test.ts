@@ -12,8 +12,7 @@ await (jest as any).unstable_mockModule('@actions/github', () => ({
   context: mockContext,
   getOctokit: (...args: any[]) => mockGetOctokit(...args),
 }));
-import { SemanticVersion } from '../src/semver';
-import { Impact } from '../src/types.js';
+import { SemanticVersion, Impact } from '../src/semver';
 
 describe('getImpactFromGithub - concise scenarios', () => {
   beforeEach(() => {
@@ -494,4 +493,19 @@ describe('getImpactFromGithub - concise scenarios', () => {
     const rc = await handle_release_candidates('tok', pr, 1, last);
     expect(rc).toBeUndefined();
   });
+});
+
+// Ensure any release notes file created by tests is cleaned up
+import { access, unlink } from 'fs/promises';
+import { constants } from 'fs';
+
+afterEach(async () => {
+  const path = './release-notes.md';
+  try {
+    await access(path, constants.F_OK);
+    // If file exists, remove it
+    await unlink(path);
+  } catch {
+    // ignore if file does not exist or cannot be removed
+  }
 });

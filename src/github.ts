@@ -1,10 +1,11 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-
+import { readFile, access } from 'fs/promises';
+import { constants } from 'fs';
 import { LRUCache, filterRCTagsByBaseline } from './utils.js';
 import * as git from './git.js';
 import { SemanticVersion } from './semver.js';
-import type { Commit, Release } from './git.js';
+import type { Commit } from './git.js';
 
 /**
  * Minimal Pull Request interface capturing commonly-used fields.
@@ -85,7 +86,7 @@ export function getPrTitleFromContext(): string | undefined {
  * First attempts to get commits from local git, then falls back to GitHub API.
  * If token is provided it will be used to construct an Octokit instance.
  */
-export async function getPrCommits(token?: string): Promise<Commit[]> {
+export async function getPrCommits(token: string): Promise<Commit[]> {
   try {
     // Try to obtain a PullRequest object from context first; fall back to ref parsing
     const pr = getPrFromContext();
@@ -125,13 +126,6 @@ export async function getPrCommits(token?: string): Promise<Commit[]> {
       );
       return [];
     }
-    if (!token) {
-      core.debug(
-        'No token provided and no local git commits found; cannot list PR commits',
-      );
-      return [];
-    }
-
     const { octokit, owner, repo } = getOctokitAndRepo(token);
     const cacheKey = `prCommits:${owner}/${repo}:${pull_number}`;
     let p = GH_CACHE.get(cacheKey) as Promise<Commit[]> | undefined;
@@ -173,24 +167,11 @@ export async function getPrCommits(token?: string): Promise<Commit[]> {
 }
 
 /**
- * Return the most recent tag name for the repository in the Actions context.
- * First attempts to get the tag from local git, then falls back to GitHub API.
- * If no token is provided or both methods fail, returns undefined.
+ * Return the most recent tag name for the repository in the Actions context using GitHub API.
+ * Returns undefined if the API call fails.
  */
 export async function getLatestTag(token: string): Promise<string | undefined> {
   try {
-    // First, try to get the latest tag from local git
-    const localTag = await git.getLatestTagLocal();
-    if (localTag) {
-      return localTag;
-    }
-
-    // Fallback to GitHub API if local git doesn't work or no token provided
-    if (!token) {
-      core.debug('No token provided and no local git tag found');
-      return undefined;
-    }
-
     const { octokit, owner, repo } = getOctokitAndRepo(token);
     const cacheKey = `latestTag:${owner}/${repo}`;
     let p = GH_CACHE.get(cacheKey) as Promise<string | undefined> | undefined;
@@ -218,8 +199,7 @@ export async function getLatestTag(token: string): Promise<string | undefined> {
 
 /**
  * Return the latest release object for the repository in the Actions context.
- * First attempts to get release info from local git tags, then falls back to GitHub API.
- * If no token is provided or both methods fail, returns undefined.
+ * Gets release info from GitHub API.
  */
 export async function getLatestRelease(
   token: string,
@@ -267,6 +247,28 @@ export async function getFileContent(
   ref?: string,
 ): Promise<string | undefined> {
   try {
+    if (!ref) {
+      try {
+        await access(filePath, constants.F_OK);
+        core.info(`Found file locally: ${filePath}`);
+        const content = await readFile(filePath, 'utf8');
+        return content;
+      } catch {
+        // File doesn't exist locally, continue to git method
+        core.debug(`File not found locally: ${filePath}`);
+      }
+    }
+
+    if (!token) {
+      core.warning(
+        `No token provided and file not found locally or in git: ${filePath}`,
+      );
+      return undefined;
+    }
+
+    core.info(
+      `File not found in git, attempting to download from GitHub: ${filePath}`,
+    );
     const { octokit, owner, repo } = getOctokitAndRepo(token);
 
     const apiParams: {
@@ -309,9 +311,9 @@ export async function getFileContent(
 
 /**
  * Get all RC (Release Candidate) tags since a baseline version using GitHub API.
- * This function fetches RC tags from both GitHub tags and releases.
+ * This function fetches RC tags from GitHub repository tags only.
  */
-export async function getReleaseCandidatesSinceLatestRelease(
+export async function getReleaseCandidates(
   token: string,
   baseline: SemanticVersion,
 ): Promise<Array<{ name: string }>> {
@@ -326,14 +328,9 @@ export async function getReleaseCandidatesSinceLatestRelease(
     const repo = ctx.repo.repo;
     const octokit = github.getOctokit(token);
 
-    // We'll collect RC-like identifiers from both tags and releases, dedupe by
-    // name and return any that are newer than the baseline. Using both
-    // sources avoids missing previously-created RCs that exist as releases
-    // (which can happen when a previous run created a release but the tag
-    // listing did not reveal it for some reason).
+    // Fetch only repository tags (not releases)
     const per_page = 100;
     const allTags: Array<{ name: string }> = [];
-    const seen = new Set<string>();
 
     // Fetch tag names (paged)
     let page = 1;
@@ -346,31 +343,8 @@ export async function getReleaseCandidatesSinceLatestRelease(
       });
       if (!res || !Array.isArray(res.data) || res.data.length === 0) break;
       for (const t of res.data) {
-        if (t.name && !seen.has(t.name)) {
-          seen.add(t.name);
+        if (t.name) {
           allTags.push({ name: t.name });
-        }
-      }
-      if (res.data.length < per_page) break;
-      page += 1;
-    }
-
-    // Fetch releases (paged) and consider their tag_name or name
-    page = 1;
-    while (true) {
-      const res = await octokit.rest.repos.listReleases({
-        owner,
-        repo,
-        per_page,
-        page,
-      });
-      if (!res || !Array.isArray(res.data) || res.data.length === 0) break;
-      for (const r of res.data) {
-        // Release may have tag_name or a name; prefer tag_name then name
-        const tagName = r.tag_name ?? r.name;
-        if (tagName && !seen.has(tagName)) {
-          seen.add(tagName);
-          allTags.push({ name: tagName });
         }
       }
       if (res.data.length < per_page) break;
@@ -381,7 +355,7 @@ export async function getReleaseCandidatesSinceLatestRelease(
     const results = filterRCTagsByBaseline(allTags, baseline);
 
     core.info(
-      `Found ${results.length} release-candidate entry(s) from GitHub API since latest release`,
+      `Found ${results.length} release-candidate tag(s) from GitHub API since latest release`,
     );
     return results;
   } catch (err) {

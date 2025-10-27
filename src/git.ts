@@ -2,46 +2,15 @@ import * as core from '@actions/core';
 import { spawn } from 'child_process';
 import { SemanticVersion } from './semver.js';
 import { filterRCTagsByBaseline } from './utils.js';
-import { readFile, access } from 'fs/promises';
-import { constants } from 'fs';
 
 export type Commit = { sha: string; title: string; body?: string };
 
 export type Tag = {
   name: string;
-  commit?: {
-    sha?: string;
-    url?: string;
-  };
-  zipball_url?: string;
-  tarball_url?: string;
-  node_id?: string;
-  [k: string]: unknown;
-};
-
-export type Release = {
-  id?: number;
-  tag_name: string;
-  name?: string;
-  body?: string | null;
-  draft?: boolean;
-  prerelease?: boolean;
-  created_at?: string;
-  published_at?: string | null;
-  html_url?: string;
-  url?: string;
-  author?: {
-    login?: string;
-    id?: number;
-    [k: string]: unknown;
-  };
-  assets?: Array<{
-    id?: number;
-    name?: string;
-    browser_download_url?: string;
-    [k: string]: unknown;
-  }>;
-  [k: string]: unknown;
+  commit: string;
+  author: string;
+  date: Date;
+  content: string;
 };
 
 /**
@@ -58,12 +27,12 @@ function isTestEnvironment(): boolean {
 /**
  * Execute a git command and return the output
  */
-async function execGitCommand(args: string[]): Promise<string | undefined> {
+async function execGitCommand(args: string[]): Promise<string | null> {
   try {
     // Skip git commands in test environment to avoid interfering with mocks
     if (isTestEnvironment()) {
       core.debug('Skipping git command in test environment');
-      return undefined;
+      return null;
     }
 
     return new Promise((resolve, reject) => {
@@ -84,7 +53,7 @@ async function execGitCommand(args: string[]): Promise<string | undefined> {
           resolve(stdout.trim());
         } else {
           core.debug(`Git command failed with code ${code}: ${stderr}`);
-          resolve(undefined);
+          resolve(null);
         }
       });
 
@@ -95,40 +64,27 @@ async function execGitCommand(args: string[]): Promise<string | undefined> {
     });
   } catch (error) {
     core.debug(`execGitCommand failed: ${String(error)}`);
-    return undefined;
+    return null;
   }
 }
 
 /**
  * Get the latest tag from local git repository
  */
-export async function getLatestTagLocal(): Promise<string | null> {
+export async function getLatestTag(): Promise<Tag | null> {
   try {
-    // Try to get the latest tag using git describe
-    const result = await execGitCommand(['describe', '--tags', '--abbrev=0']);
-    if (result) {
-      core.info(`Found latest tag from local git: ${result}`);
-      return result;
-    }
-
-    // Fallback: get all tags and sort them
-    const allTags = await execGitCommand([
-      'tag',
-      '-l',
-      '--sort=-version:refname',
-    ]);
-    if (allTags) {
-      const tags = allTags.split('\n').filter((tag) => tag.trim().length > 0);
-      if (tags.length > 0) {
-        core.info(`Found latest tag from git tag list: ${tags[0]}`);
-        return tags[0];
-      }
+    // Get all tags and return the first one (most recent due to sorting)
+    const allTags = await getTags();
+    if (allTags.length > 0) {
+      const latestTag = allTags[0];
+      core.info(`Found latest tag from local git: ${latestTag.name}`);
+      return latestTag;
     }
 
     core.debug('No tags found in local git repository');
     return null;
   } catch (error) {
-    core.debug(`getLatestTagLocal failed: ${String(error)}`);
+    core.debug(`getLatestTag failed: ${String(error)}`);
     return null;
   }
 }
@@ -188,11 +144,11 @@ export async function getCommits(
  */
 async function getTags(): Promise<Tag[]> {
   try {
-    // Get all tags with their commit hashes
+    // Get all git tags (both annotated and lightweight) with their commit hashes, author info, date, and content
     const result = await execGitCommand([
       'for-each-ref',
       '--sort=-version:refname',
-      '--format=%(refname:short)|||%(objectname)',
+      '--format=%(refname:short)|||%(objectname)|||%(authorname)|||%(authordate:iso)|||%(contents)',
       'refs/tags',
     ]);
 
@@ -207,13 +163,22 @@ async function getTags(): Promise<Tag[]> {
 
     for (const line of tagLines) {
       const parts = line.split('|||');
-      if (parts.length >= 2) {
+      if (parts.length >= 5) {
         const name = parts[0].trim();
-        const sha = parts[1].trim();
+        const commit = parts[1].trim();
+        const author = parts[2].trim();
+        const dateStr = parts[3].trim();
+        const content = parts[4] ? parts[4].trim() : '';
+
+        // Parse the ISO date string
+        const date = new Date(dateStr);
 
         tags.push({
           name,
-          commit: { sha },
+          commit,
+          author,
+          date,
+          content,
         });
       }
     }
@@ -232,27 +197,14 @@ async function getTags(): Promise<Tag[]> {
 export async function getFileContent(
   filePath: string,
   ref?: string,
-): Promise<string | undefined> {
+): Promise<string | null> {
   try {
-    // First, check if file exists locally (only if no specific ref is requested)
-    if (!ref) {
-      try {
-        await access(filePath, constants.F_OK);
-        core.info(`Found file locally: ${filePath}`);
-        const content = await readFile(filePath, 'utf8');
-        return content;
-      } catch {
-        // File doesn't exist locally, continue to git method
-        core.debug(`File not found locally: ${filePath}`);
-      }
-    }
-
     const args = ref
       ? ['show', `${ref}:${filePath}`]
       : ['show', `HEAD:${filePath}`];
     const result = await execGitCommand(args);
 
-    if (result !== undefined) {
+    if (result !== null) {
       core.info(
         `Retrieved file ${filePath} from git${ref ? ` at ref ${ref}` : ''}`,
       );
@@ -262,65 +214,10 @@ export async function getFileContent(
     core.debug(
       `File ${filePath} not found in git${ref ? ` at ref ${ref}` : ''}`,
     );
-    return undefined;
+    return null;
   } catch (error) {
     core.debug(`getFileContent failed: ${String(error)}`);
-    return undefined;
-  }
-}
-
-/**
- * Get the latest release from local git tags
- * This simulates a GitHub release using the latest git tag
- */
-export async function getLatestRelease(): Promise<Release | undefined> {
-  try {
-    const latestTag = await getLatestTagLocal();
-    if (!latestTag) {
-      core.debug('No tags found in local git repository for release');
-      return undefined;
-    }
-
-    // Get tag information including commit SHA and date
-    const tagInfo = await execGitCommand([
-      'show',
-      '--no-patch',
-      '--format=%H|||%ct',
-      latestTag,
-    ]);
-
-    if (!tagInfo) {
-      core.debug(`Could not get tag info for ${latestTag}`);
-      return undefined;
-    }
-
-    const [, timestamp] = tagInfo.split('|||');
-    const created_at = new Date(parseInt(timestamp) * 1000).toISOString();
-
-    // Try to get tag message (for annotated tags)
-    const tagMessage = await execGitCommand([
-      'tag',
-      '-l',
-      '--format=%(contents)',
-      latestTag,
-    ]);
-
-    // Create a minimal Release object from the tag
-    const release: Release = {
-      tag_name: latestTag,
-      name: latestTag,
-      body: tagMessage || `Release ${latestTag}`,
-      draft: false,
-      prerelease: latestTag.includes('-'),
-      created_at,
-      published_at: created_at,
-    };
-
-    core.info(`Created release object from local git tag: ${latestTag}`);
-    return release;
-  } catch (error) {
-    core.debug(`getLatestRelease failed: ${String(error)}`);
-    return undefined;
+    return null;
   }
 }
 
@@ -332,7 +229,6 @@ export async function getReleaseCandidates(
   baseline: SemanticVersion,
 ): Promise<Array<{ name: string }>> {
   try {
-    // Get RC tags from local git - inlined from previous getReleaseCandidates function
     const allTags = await getTags();
     const localRCs = allTags.filter((tag) => {
       return tag.name.toLowerCase().includes('rc');
