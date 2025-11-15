@@ -1,6 +1,6 @@
-import { Commit } from './github.js';
+import { Commit } from './git.js';
 import { getConventionalImpact } from './conventional_commits.js';
-import { Impact } from './types.js';
+import { Impact } from './semver.js';
 
 function getReleaseNoteSection(title: string, commits: Commit[]): string[] {
   const lines: string[] = [];

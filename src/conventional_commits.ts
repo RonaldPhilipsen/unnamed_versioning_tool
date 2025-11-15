@@ -1,11 +1,7 @@
 import * as core from '@actions/core';
-import {
-  Impact,
-  ConventionalCommitType,
-  ParsedCommitInfo,
-  TypeToImpactMapping,
-} from './types.js';
-import type { Commit, PullRequest } from './github.js';
+import { Impact } from './semver.js';
+import type { Commit } from './git.js';
+import type { PullRequest } from './github.js';
 /**
  * Maps conventional commit types to the corresponding BumpType used by the versioning logic.
  *
@@ -26,6 +22,25 @@ import type { Commit, PullRequest } from './github.js';
  *
  * @readonly
  */
+export const TypeToImpactMapping = {
+  docs: Impact.NOIMPACT,
+  style: Impact.NOIMPACT,
+  test: Impact.NOIMPACT,
+  chore: Impact.NOIMPACT,
+  build: Impact.NOIMPACT,
+  ci: Impact.NOIMPACT,
+  refactor: Impact.PATCH,
+  fix: Impact.PATCH,
+  perf: Impact.PATCH,
+  feat: Impact.MINOR,
+};
+
+export type ConventionalCommitType = keyof typeof TypeToImpactMapping;
+
+export interface ParsedCommitInfo {
+  type: ConventionalCommitType;
+  impact: Impact;
+}
 
 export function getConventionalImpact(
   object: PullRequest | Commit,

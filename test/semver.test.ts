@@ -1,5 +1,4 @@
-import { SemanticVersion } from '../src/semver';
-import { Impact } from '../src/types';
+import { SemanticVersion, Impact } from '../src/semver';
 
 describe('SemanticVersion.bump', () => {
   test('major bump resets minor and patch', () => {
@@ -177,6 +176,75 @@ describe('SemanticVersion.nextRcIndex', () => {
     const base = new SemanticVersion(3, 1, 4);
     const tags = ['v3.1.4-rcX', 'v3.1.4-preview', 'v3.1.4-rc.0'];
     expect(SemanticVersion.nextRcIndex(base, tags)).toBe(1);
+  });
+});
+
+describe('SemanticVersion.comparePrerelease', () => {
+  test('both undefined returns 0', () => {
+    expect(SemanticVersion.comparePrerelease(undefined, undefined)).toBe(0);
+  });
+
+  test('release > prerelease (undefined > defined)', () => {
+    expect(SemanticVersion.comparePrerelease(undefined, 'alpha')).toBe(1);
+  });
+
+  test('prerelease < release (defined < undefined)', () => {
+    expect(SemanticVersion.comparePrerelease('alpha', undefined)).toBe(-1);
+  });
+
+  test('identical prerelease strings return 0', () => {
+    expect(SemanticVersion.comparePrerelease('alpha.1', 'alpha.1')).toBe(0);
+  });
+
+  test('numeric identifiers compared numerically', () => {
+    expect(SemanticVersion.comparePrerelease('1', '2')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('2', '1')).toBe(1);
+    expect(SemanticVersion.comparePrerelease('10', '2')).toBe(1); // numeric comparison, not lexical
+  });
+
+  test('numeric < non-numeric identifiers', () => {
+    expect(SemanticVersion.comparePrerelease('1', 'alpha')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('alpha', '1')).toBe(1);
+  });
+
+  test('non-numeric identifiers compared lexically', () => {
+    expect(SemanticVersion.comparePrerelease('alpha', 'beta')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('beta', 'alpha')).toBe(1);
+  });
+
+  test('dot-separated identifiers compared part by part', () => {
+    expect(SemanticVersion.comparePrerelease('alpha.1', 'alpha.2')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('alpha.2', 'alpha.1')).toBe(1);
+    expect(SemanticVersion.comparePrerelease('alpha.1', 'beta.1')).toBe(-1);
+  });
+
+  test('shorter prerelease < longer prerelease when prefixes match', () => {
+    expect(SemanticVersion.comparePrerelease('alpha', 'alpha.1')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('alpha.1', 'alpha')).toBe(1);
+    expect(SemanticVersion.comparePrerelease('alpha.1', 'alpha.1.2')).toBe(-1);
+  });
+
+  test('complex prerelease comparison scenarios', () => {
+    // alpha < alpha.1 < alpha.beta < beta < beta.1 < beta.11 < rc.1
+    expect(SemanticVersion.comparePrerelease('alpha', 'alpha.1')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('alpha.1', 'alpha.beta')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('alpha.beta', 'beta')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('beta', 'beta.1')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('beta.1', 'beta.11')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('beta.11', 'rc.1')).toBe(-1);
+  });
+
+  test('mixed numeric and non-numeric parts', () => {
+    expect(SemanticVersion.comparePrerelease('1.alpha', '1.beta')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('1.alpha', '2.alpha')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('alpha.1', 'alpha.alpha')).toBe(
+      -1,
+    );
+  });
+
+  test('alpha.2 vs beta.1 comparison', () => {
+    expect(SemanticVersion.comparePrerelease('alpha.2', 'beta.1')).toBe(-1);
+    expect(SemanticVersion.comparePrerelease('beta.1', 'alpha.2')).toBe(1);
   });
 });
 

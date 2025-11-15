@@ -1,3 +1,5 @@
+import { SemanticVersion } from './semver.js';
+
 // Lightweight LRU cache used by various modules. Stores arbitrary values.
 export class LRUCache<V> {
   private map: Map<string, V>;
@@ -28,6 +30,47 @@ export class LRUCache<V> {
   delete(key: string): void {
     this.map.delete(key);
   }
+}
+
+/**
+ * Filter RC tags based on baseline version comparison.
+ * This is a shared utility function used by both local git and GitHub API functions.
+ */
+export function filterRCTagsByBaseline(
+  tags: Array<{ name: string }>,
+  baseline: SemanticVersion,
+): Array<{ name: string }> {
+  const results: Array<{ name: string }> = [];
+  const seen = new Set<string>();
+
+  for (const tag of tags) {
+    const name = tag.name;
+    if (!name) continue;
+    if (seen.has(name)) continue;
+
+    const parsed = SemanticVersion.parse(name);
+    if (!parsed) continue;
+    if (!parsed.prerelease) continue;
+    if (!parsed.prerelease.toLowerCase().includes('rc')) continue;
+
+    const cmp = SemanticVersion.compare(parsed, baseline);
+    if (cmp <= 0) {
+      if (
+        parsed.major === baseline.major &&
+        parsed.minor === baseline.minor &&
+        parsed.patch === baseline.patch
+      ) {
+        // allow RC targeting same base version even if cmp < 0
+      } else {
+        continue; // skip older
+      }
+    }
+
+    seen.add(name);
+    results.push({ name });
+  }
+
+  return results;
 }
 
 export default LRUCache;

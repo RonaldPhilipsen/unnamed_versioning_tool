@@ -12,8 +12,7 @@ await (jest as any).unstable_mockModule('@actions/github', () => ({
   context: mockContext,
   getOctokit: (...args: any[]) => mockGetOctokit(...args),
 }));
-import { SemanticVersion } from '../src/semver';
-import { Impact } from '../src/types.js';
+import { SemanticVersion, Impact } from '../src/semver';
 
 describe('getImpactFromGithub - concise scenarios', () => {
   beforeEach(() => {
@@ -45,7 +44,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
       getLatestRelease: async () => undefined,
       getPrCommits: mockedGetPrCommits,
       getPrFromContext: () => undefined,
-      getAllRCsSinceLatestRelease: async () => [],
+      getReleaseCandidatesSinceLatestRelease: async () => [],
     }));
     // @ts-ignore
     await (jest as any).unstable_mockModule(
@@ -92,7 +91,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
       getLatestRelease: async () => undefined,
       getPrCommits: mockedGetPrCommits,
       getPrFromContext: () => undefined,
-      getAllRCsSinceLatestRelease: async () => [],
+      getReleaseCandidatesSinceLatestRelease: async () => [],
     }));
 
     const mod = await import('../src/main');
@@ -148,9 +147,9 @@ describe('getImpactFromGithub - concise scenarios', () => {
     ghMock.context.repo = { owner: 'o', repo: 'r' };
     const baseline = new SemanticVersion(0, 0, 0);
     const modAll = await import('../src/main');
-    const { getAllRCsSinceLatestRelease } = modAll;
+    const { getReleaseCandidatesSinceLatestRelease } = modAll;
     expect(
-      await getAllRCsSinceLatestRelease(undefined as any, baseline),
+      await getReleaseCandidatesSinceLatestRelease(undefined as any, baseline),
     ).toEqual([]);
   });
 
@@ -173,7 +172,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
       },
     }));
     const modAll3 = await import('../src/main');
-    const { getAllRCsSinceLatestRelease: getAll3 } = modAll3;
+    const { getReleaseCandidatesSinceLatestRelease: getAll3 } = modAll3;
     const rcs = await getAll3('token', baseline);
     // In environments where the octokit mock isn't applied the result may be empty.
     const names = rcs.map((t: any) => t.name);
@@ -181,37 +180,6 @@ describe('getImpactFromGithub - concise scenarios', () => {
   });
 
   describe('run() behavior', () => {
-    test('no token -> setFailed', async () => {
-      jest.resetModules();
-      const coreMock = {
-        info: jest.fn(),
-        debug: jest.fn(),
-        warning: jest.fn(),
-        error: jest.fn(),
-        setFailed: jest.fn(),
-        getInput: jest.fn(),
-        summary: {
-          addHeading: jest.fn(() => ({
-            addTable: jest.fn(() => ({ addRaw: jest.fn(), write: jest.fn() })),
-          })),
-          write: jest.fn(),
-        },
-      } as any;
-
-      // ensure no token in env
-      process.env.GITHUB_TOKEN = '';
-      process.env.INPUT_GITHUB_TOKEN = '';
-
-      // mock core so main imports see our mocks
-      // @ts-ignore
-      await (jest as any).unstable_mockModule('@actions/core', () => coreMock);
-      const mod = await import('../src/main');
-      await mod.run();
-      expect(coreMock.setFailed).toHaveBeenCalledWith(
-        'No GITHUB_TOKEN available — cannot fetch releases',
-      );
-    });
-
     test('unparsable latest release -> setFailed', async () => {
       const coreMock = {
         info: jest.fn(),
@@ -238,7 +206,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
         getLatestRelease: async () => ({ name: 'not-a-version' }),
         getPrFromContext: () => undefined,
         getPrCommits: async () => [],
-        getAllRCsSinceLatestRelease: async () => [],
+        getReleaseCandidatesSinceLatestRelease: async () => [],
       }));
       // mock core
       // @ts-ignore
@@ -276,7 +244,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
         getLatestRelease: async () => ({ name: 'v1.2.3' }),
         getPrFromContext: () => undefined,
         getPrCommits: async () => [],
-        getAllRCsSinceLatestRelease: async () => [],
+        getReleaseCandidatesSinceLatestRelease: async () => [],
       }));
       // @ts-ignore
       await (jest as any).unstable_mockModule('@actions/core', () => coreMock);
@@ -322,7 +290,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
         getLatestRelease: async () => ({ name: 'v1.2.3' }),
         getPrFromContext: () => pr,
         getPrCommits: async () => [],
-        getAllRCsSinceLatestRelease: async () => [],
+        getReleaseCandidatesSinceLatestRelease: async () => [],
       }));
       // @ts-ignore
       await (jest as any).unstable_mockModule(
@@ -379,7 +347,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
         getLatestRelease: async () => ({ name: 'v1.0.0' }),
         getPrFromContext: () => pr,
         getPrCommits: async () => [],
-        getAllRCsSinceLatestRelease: async () => [
+        getReleaseCandidatesSinceLatestRelease: async () => [
           { name: 'v1.0.1-rc.0' },
           { name: 'v1.0.1-rc.1' },
         ],
@@ -437,7 +405,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
     await (jest as any).unstable_mockModule('@actions/core', () => coreMock);
     // @ts-ignore
     await (jest as any).unstable_mockModule('../src/github.js', () => ({
-      getAllRCsSinceLatestRelease: async () => [
+      getReleaseCandidatesSinceLatestRelease: async () => [
         { name: 'v1.3.0-rc.0' },
         { name: 'v1.3.0-rc.1' },
       ],
@@ -475,7 +443,7 @@ describe('getImpactFromGithub - concise scenarios', () => {
     await (jest as any).unstable_mockModule('@actions/core', () => coreMock);
     // @ts-ignore
     await (jest as any).unstable_mockModule('../src/github.js', () => ({
-      getAllRCsSinceLatestRelease: async () => [
+      getReleaseCandidatesSinceLatestRelease: async () => [
         { name: 'v1.2.0-rc.0' },
         { name: 'v1.2.0-rc.1' },
       ],
@@ -525,4 +493,19 @@ describe('getImpactFromGithub - concise scenarios', () => {
     const rc = await handle_release_candidates('tok', pr, 1, last);
     expect(rc).toBeUndefined();
   });
+});
+
+// Ensure any release notes file created by tests is cleaned up
+import { access, unlink } from 'fs/promises';
+import { constants } from 'fs';
+
+afterEach(async () => {
+  const path = './release-notes.md';
+  try {
+    await access(path, constants.F_OK);
+    // If file exists, remove it
+    await unlink(path);
+  } catch {
+    // ignore if file does not exist or cannot be removed
+  }
 });

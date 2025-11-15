@@ -5,7 +5,7 @@ import {
   getConventionalImpact,
 } from '../src/conventional_commits';
 import { PullRequest } from '../src/github.js';
-import { Impact } from '../src/types.js';
+import { Impact } from '../src/semver.js';
 
 describe('ParseSemanticTitle', () => {
   test('feat with breaking-change footer => minor/major detection', () => {

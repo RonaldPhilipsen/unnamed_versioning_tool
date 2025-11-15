@@ -1,12 +1,22 @@
 import * as core from '@actions/core';
-import * as github from '@actions/github';
 import * as gh from './github.js';
-import type { Commit, PullRequest, Tag } from './github.js';
-import { SemanticVersion } from './semver.js';
-import { getConventionalImpact } from './conventional_commits.js';
-import { Impact, ImpactResult, ParsedCommitInfo } from './types.js';
+import type { PullRequest } from './github.js';
+import { SemanticVersion, Impact } from './semver.js';
+import {
+  getConventionalImpact,
+  ParsedCommitInfo,
+} from './conventional_commits.js';
 import { generateReleaseNotes } from './release_notes.js';
+import { getReleaseCandidates, Commit } from './git.js';
 import { writeFile } from 'fs/promises';
+
+export type ImpactResult = {
+  prImpact?: ParsedCommitInfo;
+  commitImpacts: ParsedCommitInfo[];
+  maxCommitImpact?: Impact;
+  finalImpact?: ParsedCommitInfo;
+  warning?: string;
+};
 
 export async function getImpactFromGithub(
   pr: PullRequest,
@@ -95,13 +105,13 @@ export async function handle_release_candidates(
     // Fetch previous RCs for the bumped base version. We pass the bumped base
     // as the baseline so that RC tags targeting the bumped version are found
     // even if they were created before the latest release.
-    const previous_release_candidates = await getAllRCsSinceLatestRelease(
-      token,
-      bumped_base,
+    const previous_release_candidates =
+      await getReleaseCandidatesSinceLatestRelease(token, bumped_base);
+    // Ask SemanticVersion to compute the next RC index
+    const rcNames = previous_release_candidates.map((version) =>
+      version.toString(),
     );
-    // Extract tag names and ask SemanticVersion to compute the next RC index
-    const tagNames = previous_release_candidates.map((t: Tag) => t.name);
-    const nextRc = SemanticVersion.nextRcIndex(bumped_base, tagNames);
+    const nextRc = SemanticVersion.nextRcIndex(bumped_base, rcNames);
     // create the prerelease string e.g. 'rc1' (if nextRc is 1) or 'rc0' if 0
     prerelease = `rc${nextRc}`;
   }
@@ -109,95 +119,43 @@ export async function handle_release_candidates(
 }
 
 /**
- * Return all pull requests labelled as release-candidate that were merged since
- * the latest release. If no token is provided or an error occurs, returns an
- * empty array. This uses the `getLatestRelease` published_at timestamp to
- * filter PRs by their merged_at field.
+ * Return all release candidate semantic versions that were created since
+ * the latest release. First attempts to get RC tags from local git, then falls back
+ * to GitHub API. If no token is provided or an error occurs, returns an empty array.
  */
-export async function getAllRCsSinceLatestRelease(
+export async function getReleaseCandidatesSinceLatestRelease(
   token: string,
   baseline: SemanticVersion,
-): Promise<Tag[]> {
+): Promise<SemanticVersion[]> {
   try {
-    const ctx = github.context;
-    const owner = ctx.repo.owner;
-    const repo = ctx.repo.repo;
-    const octokit = github.getOctokit(token);
-    // We'll collect RC-like identifiers from both tags and releases, dedupe by
-    // name and return any that are newer than the baseline. Using both
-    // sources avoids missing previously-created RCs that exist as releases
-    // (which can happen when a previous run created a release but the tag
-    // listing did not reveal it for some reason).
-    const per_page = 100;
-    const results: Tag[] = [];
-    const seen = new Set<string>();
+    // First, try to get RC tags from local git
+    const localResults = await getReleaseCandidates(baseline);
 
-    function considerName(name: string | undefined) {
-      if (!name) return;
-      if (seen.has(name)) return;
-      const parsed = SemanticVersion.parse(name);
-      if (!parsed) return;
-      if (!parsed.prerelease) return;
-      if (!parsed.prerelease.toLowerCase().includes('rc')) return;
-      const cmp = SemanticVersion.compare(parsed, baseline);
-
-      if (cmp <= 0) {
-        if (
-          parsed.major === baseline.major &&
-          parsed.minor === baseline.minor &&
-          parsed.patch === baseline.patch
-        ) {
-          // allow RC targeting same base version even if cmp < 0
-        } else {
-          return; // skip older
-        }
-      }
-      seen.add(name);
-      // preserve the original object shape where possible; at minimum include name
-      results.push({ name });
+    if (localResults.length > 0) {
+      const rcVersions = localResults
+        .map((result) => SemanticVersion.parse(result.name))
+        .filter((version): version is SemanticVersion => version !== undefined);
+      core.info(`Found ${rcVersions.length} RC tags from local git`);
+      return rcVersions;
     }
 
-    // Fetch tag names (paged)
-    let page = 1;
-    while (true) {
-      const res = await octokit.rest.repos.listTags({
-        owner,
-        repo,
-        per_page,
-        page,
-      });
-      if (!res || !Array.isArray(res.data) || res.data.length === 0) break;
-      for (const t of res.data as Tag[]) {
-        considerName(t.name);
-      }
-      if (res.data.length < per_page) break;
-      page += 1;
+    // Fallback to GitHub API if local git doesn't work or no token provided
+    if (!token) {
+      core.debug('No token provided and no local RC tags found');
+      return [];
     }
 
-    // Fetch releases (paged) and consider their tag_name or name
-    page = 1;
-    while (true) {
-      const res = await octokit.rest.repos.listReleases({
-        owner,
-        repo,
-        per_page,
-        page,
-      });
-      if (!res || !Array.isArray(res.data) || res.data.length === 0) break;
-      for (const r of res.data) {
-        // Release may have tag_name or a name; prefer tag_name then name
-        considerName(r.tag_name ?? r.name);
-      }
-      if (res.data.length < per_page) break;
-      page += 1;
-    }
+    const githubResults = await gh.getReleaseCandidates(token, baseline);
 
+    const rcVersions = githubResults
+      .map((result) => SemanticVersion.parse(result.name))
+      .filter((version): version is SemanticVersion => version !== undefined);
     core.info(
-      `Found ${results.length} release-candidate entry(s) since latest release`,
+      `Found ${rcVersions.length} release-candidate entry(s) from GitHub API since latest release`,
     );
-    return results;
+    return rcVersions;
   } catch (err) {
-    core.debug(`getAllRCsSinceLatestRelease failed: ${String(err)}`);
+    core.debug(`getReleaseCandidatesSinceLatestRelease failed: ${String(err)}`);
     return [];
   }
 }
